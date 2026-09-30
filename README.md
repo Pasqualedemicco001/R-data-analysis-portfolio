@@ -6,7 +6,7 @@ This repository contains selected projects focused on data analysis, statistical
 
 ## Projects
 
-Coming soon.
+01-football-comments-text-mining
 
 ## Skills
 
