@@ -1,0 +1,2791 @@
+---
+title: "openvar"
+output: html_document
+date: "2025-09-24"
+---
+
+```{r}
+# ------------------------------------------------
+# PUNTATA 1 - STAGIONE 2
+# ------------------------------------------------
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+library(tm)
+
+# ------------------------------------------------
+# 0. Scarico e carico il modello italiano udpipe
+# ------------------------------------------------
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# ------------------------------------------------
+# 1. Imposto la cartella di lavoro
+# ------------------------------------------------
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+# ------------------------------------------------
+# 2. Importo il dataset
+# ------------------------------------------------
+openvarcom <- read_delim("openvarcom.csv", 
+                         delim = "\t", 
+                         escape_double = FALSE, 
+                         trim_ws = TRUE)
+
+# ------------------------------------------------
+# 3. Pulizia colonne non necessarie
+# ------------------------------------------------
+openvarcom_clean <- openvarcom %>%
+  select(-replyCount, -likeCount, -publishedAt, 
+         -isReply, -isReplyTo, -isReplyToName, -authorName)
+
+# ------------------------------------------------
+# 4. Pulizia del testo
+# ------------------------------------------------
+openvarcom_clean$text <- gsub("'", " ", openvarcom_clean$text)
+openvarcom_clean$text <- gsub("[^\x01-\x7F]", " ", openvarcom_clean$text)
+openvarcom_clean$text <- trimws(openvarcom_clean$text)
+
+# ------------------------------------------------
+# 5. Lemmatizzazione con udpipe
+# ------------------------------------------------
+doc_ids <- as.character(seq_len(nrow(openvarcom_clean)))
+annot <- udpipe_annotate(ud_model, x = openvarcom_clean$text, doc_id = doc_ids)
+annoi_df <- as.data.frame(annot)
+
+# ------------------------------------------------
+# 6. Pulizia UPOS
+# ------------------------------------------------
+annoi_df$lemma[is.na(annoi_df$lemma)] <- ""
+
+remove_upos <- c("PUNCT", "ADP", "DET", "CCONJ", "SCONJ",
+                 "X", "PART", "SYM", "NUM", "INTJ")
+
+annoi_df <- annoi_df %>%
+  filter(!(upos %in% remove_upos)) %>%
+  filter(lemma != "")
+
+# ------------------------------------------------
+# 6b. Stopwords AGGIORNATE per rimuovere parole dai grafici
+# ------------------------------------------------
+extra_stopwords <- c(
+  "che","si","io","non","avere","stare","fare",
+  "dire","quello","essere","dovere","cosa","ci",
+  "lo","poi","perch","altro","anche","tutto","solo","chi","il","lo","la","i","gli",
+  "le","di","a","da","in","con","l","I","mi","me","mo"
+)
+
+# ------------------------------------------------
+# 6c. Rimuovo lemmi lunghi (>15 caratteri)
+# ------------------------------------------------
+annoi_df <- annoi_df %>%
+  filter(nchar(lemma) <= 15)
+
+# ------------------------------------------------
+# 7. Frequenze lemmi (pulite)
+# ------------------------------------------------
+lemma_freq <- annoi_df %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  count(lemma, name = "freq") %>%
+  arrange(desc(freq))
+
+cat("\n--- Top 20 parole (UDPipe lemma frequency) ---\n")
+print(head(lemma_freq, 20))
+
+ggplot(head(lemma_freq, 20),
+       aes(x = reorder(lemma, freq), y = freq)) +
+  geom_col(fill = "#D55E00") +
+  coord_flip() +
+  labs(title = "Top 20 parole più frequenti (UDPipe)",
+       x = "Lemma", y = "Frequenza") +
+  theme_minimal(base_size = 14)
+
+# ------------------------------------------------
+# 8. Frequenza parole chiave
+# ------------------------------------------------
+keywords <- c("rigore", "var", "arbitro")
+
+key_freq <- lemma_freq %>% filter(lemma %in% keywords)
+
+ggplot(key_freq,
+       aes(x = reorder(lemma, freq), y = freq)) +
+  geom_col(fill = "#0072B2") +
+  coord_flip() +
+  labs(title = "Frequenza parole chiave",
+       x = "Parola", y = "Frequenza") +
+  theme_minimal(base_size = 14)
+
+# ------------------------------------------------
+# 9. Ricostruisco documenti dai lemmi
+# ------------------------------------------------
+texts_by_doc <- annoi_df %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop")
+
+all_docs <- data.frame(doc_id = doc_ids, stringsAsFactors = FALSE)
+
+texts_by_doc <- all_docs %>%
+  left_join(texts_by_doc, by = "doc_id") %>%
+  mutate(text = ifelse(is.na(text), "", text)) %>%
+  arrange(as.integer(doc_id))
+
+# ------------------------------------------------
+# 10. Corpus quanteda
+# ------------------------------------------------
+corp <- corpus(texts_by_doc$text)
+
+# ------------------------------------------------
+# 11. Tokenizzazione + pulizia extra
+# ------------------------------------------------
+tokens_clean <- tokens(corp,
+                         remove_punct = TRUE,
+                         remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(
+    stopwords("italian"),
+    extra_stopwords,
+    "cose","cosi","mano","mani","fa","più","perchè",
+    "parte","parti","calcio","b","poi","gi","perch","cos",
+    "x","d","pu","ogni","po","varre","pe","qui","no"
+  ))
+
+# ------------------------------------------------
+# 12. Creo DFM
+# ------------------------------------------------
+dfm_unigrams <- dfm(tokens_clean)
+
+cat("\n--- Top 20 parole (DFM unigrammi) ---\n")
+print(topfeatures(dfm_unigrams, 20))
+
+# Grafico
+top_vec <- topfeatures(dfm_unigrams, 20)
+
+df_top <- data.frame(
+  feature = names(top_vec),
+  frequency = as.numeric(top_vec),
+  stringsAsFactors = FALSE
+)
+
+ggplot(df_top,
+       aes(x = reorder(feature, frequency), y = frequency)) +
+  geom_col(fill = "#0072B2") +
+  coord_flip() +
+  labs(title = "Top 20 parole più frequenti (DFM)",
+       x = NULL, y = "Frequenza") +
+  theme_minimal(base_size = 14)
+
+# ------------------------------------------------
+# 13. Wordcloud
+# ------------------------------------------------
+set.seed(123)
+textplot_wordcloud(dfm_unigrams,
+                   max_words = 50,
+                   random_order = FALSE,
+                   rotation = 0.25,
+                   color = brewer.pal(8, "Dark2"))
+
+# ------------------------------------------------
+# 14. Parole associate (findAssocs)
+# ------------------------------------------------
+dfm_tm <- as.DocumentTermMatrix(dfm_unigrams, weighting = weightTf)
+
+for (kw in keywords) {
+  cat("\n--- Parole associate a:", kw, "---\n")
+  if (!(kw %in% Terms(dfm_tm))) {
+    cat("Parola chiave non presente nel corpus.\n")
+  } else {
+    assoc <- findAssocs(dfm_tm, kw, corlimit = 0.3)
+    print(assoc)
+  }
+}
+
+```
+
+```{r}
+# ------------------------------------------------
+# PUNTATA 1 - STAGIONE 2
+# ------------------------------------------------
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+library(tm)
+
+# ------------------------------------------------
+# 0. Scarico e carico il modello italiano udpipe
+# ------------------------------------------------
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# ------------------------------------------------
+# 1. Imposto la cartella di lavoro
+# ------------------------------------------------
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+# ------------------------------------------------
+# 2. Importo il dataset
+# ------------------------------------------------
+openvarcom <- read_delim("openvarcom.csv", 
+                         delim = "\t", 
+                         escape_double = FALSE, 
+                         trim_ws = TRUE)
+
+# ------------------------------------------------
+# 3. Pulizia colonne non necessarie
+# ------------------------------------------------
+openvarcom_clean <- openvarcom %>%
+  select(-replyCount, -likeCount, -publishedAt, 
+         -isReply, -isReplyTo, -isReplyToName, -authorName)
+
+# ------------------------------------------------
+# 4. Pulizia del testo
+# ------------------------------------------------
+openvarcom_clean$text <- gsub("'", " ", openvarcom_clean$text)
+openvarcom_clean$text <- gsub("[^\x01-\x7F]", " ", openvarcom_clean$text)
+openvarcom_clean$text <- trimws(openvarcom_clean$text)
+
+# ------------------------------------------------
+# 5. Lemmatizzazione con udpipe
+# ------------------------------------------------
+doc_ids <- as.character(seq_len(nrow(openvarcom_clean)))
+annot <- udpipe_annotate(ud_model, x = openvarcom_clean$text, doc_id = doc_ids)
+annoi_df <- as.data.frame(annot)
+
+# ------------------------------------------------
+# 6. Pulizia UPOS
+# ------------------------------------------------
+annoi_df$lemma[is.na(annoi_df$lemma)] <- ""
+
+remove_upos <- c("PUNCT", "ADP", "DET", "CCONJ", "SCONJ",
+                 "X", "PART", "SYM", "NUM", "INTJ")
+
+annoi_df <- annoi_df %>%
+  filter(!(upos %in% remove_upos)) %>%
+  filter(lemma != "")
+
+# ------------------------------------------------
+# 6b. Stopwords
+# ------------------------------------------------
+extra_stopwords <- c(
+  "che","si","io","non","avere","stare","fare",
+  "dire","quello","essere","dovere","cosa","ci",
+  "lo","poi","perch","altro","anche","tutto","solo","chi",
+  "il","lo","la","i","gli","le","di","a","da","in","con",
+  "l","I","mi","me","mo"
+)
+
+# ------------------------------------------------
+# 6c. Rimuovo lemmi lunghi
+# ------------------------------------------------
+annoi_df <- annoi_df %>%
+  filter(nchar(lemma) <= 15)
+
+# ------------------------------------------------
+# 7. Frequenze lemmi
+# ------------------------------------------------
+lemma_freq <- annoi_df %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  count(lemma, name = "freq") %>%
+  arrange(desc(freq))
+
+cat("\n--- Top 20 parole (UDPipe lemma frequency) ---\n")
+print(head(lemma_freq, 20))
+
+ggplot(head(lemma_freq, 20),
+       aes(x = reorder(lemma, freq), y = freq)) +
+  geom_col(fill = "#D55E00") +
+  coord_flip() +
+  labs(title = "Top 20 parole più frequenti (UDPipe)",
+       x = "Lemma", y = "Frequenza") +
+  theme_minimal(base_size = 14)
+
+# ------------------------------------------------
+# 8. Frequenza parole chiave
+# ------------------------------------------------
+keywords <- c("rigore", "var", "arbitro")
+
+key_freq <- lemma_freq %>% filter(lemma %in% keywords)
+
+ggplot(key_freq,
+       aes(x = reorder(lemma, freq), y = freq)) +
+  geom_col(fill = "#0072B2") +
+  coord_flip() +
+  labs(title = "Frequenza parole chiave",
+       x = "Parola", y = "Frequenza") +
+  theme_minimal(base_size = 14)
+
+# ------------------------------------------------
+# 9. Ricostruisco documenti dai lemmi
+# ------------------------------------------------
+texts_by_doc <- annoi_df %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop")
+
+all_docs <- data.frame(doc_id = doc_ids, stringsAsFactors = FALSE)
+
+texts_by_doc <- all_docs %>%
+  left_join(texts_by_doc, by = "doc_id") %>%
+  mutate(text = ifelse(is.na(text), "", text)) %>%
+  arrange(as.integer(doc_id))
+
+# ------------------------------------------------
+# 10. Corpus quanteda
+# ------------------------------------------------
+corp <- corpus(texts_by_doc$text)
+
+# ------------------------------------------------
+# 11. Tokenizzazione + pulizia extra
+# ------------------------------------------------
+tokens_clean <- tokens(corp,
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(
+    stopwords("italian"),
+    extra_stopwords,
+    "cose","cosi","mano","mani","fa","più","perchè",
+    "parte","parti","calcio","b","poi","gi","perch","cos",
+    "x","d","pu","ogni","po","varre","pe","qui","no"
+  ))
+
+# ------------------------------------------------
+# 12. Creo DFM
+# ------------------------------------------------
+dfm_unigrams <- dfm(tokens_clean)
+
+cat("\n--- Top 20 parole (DFM unigrammi) ---\n")
+print(topfeatures(dfm_unigrams, 20))
+
+# Grafico
+top_vec <- topfeatures(dfm_unigrams, 20)
+
+df_top <- data.frame(
+  feature = names(top_vec),
+  frequency = as.numeric(top_vec),
+  stringsAsFactors = FALSE
+)
+
+ggplot(df_top,
+       aes(x = reorder(feature, frequency), y = frequency)) +
+  geom_col(fill = "#0072B2") +
+  coord_flip() +
+  labs(title = "Top 20 parole più frequenti (DFM)",
+       x = NULL, y = "Frequenza") +
+  theme_minimal(base_size = 14)
+
+# ------------------------------------------------
+# 13. Wordcloud
+# ------------------------------------------------
+set.seed(123)
+textplot_wordcloud(dfm_unigrams,
+                   max_words = 50,
+                   random_order = FALSE,
+                   rotation = 0.25,
+                   color = brewer.pal(8, "Dark2"))
+
+# ------------------------------------------------
+# 14. Parole associate
+# ------------------------------------------------
+dfm_tm <- as.DocumentTermMatrix(dfm_unigrams, weighting = weightTf)
+
+for (kw in keywords) {
+  cat("\n--- Parole associate a:", kw, "---\n")
+  if (!(kw %in% Terms(dfm_tm))) {
+    cat("Parola chiave non presente nel corpus.\n")
+  } else {
+    assoc <- findAssocs(dfm_tm, kw, corlimit = 0.3)
+    print(assoc)
+  }
+}
+
+# ================================================================
+# 15. ANALISI DELLE CORRISPONDENZE LESSICALI (ACL) - VERSIONE LEGGIBILE
+# ================================================================
+library(FactoMineR)
+library(factoextra)
+
+cat("\n\n=============================\n")
+cat("   ANALISI DELLE CORRISPONDENZE (ACL)\n")
+cat("=============================\n")
+
+# ------------------------------------------------
+# 15.1 Riduzione dfm (solo parole con almeno 20 documenti)
+#     (se vuoi più parole, puoi abbassare a 10)
+# ------------------------------------------------
+dfm_acl <- dfm_trim(dfm_unigrams, min_docfreq = 20)
+mat_acl <- as.matrix(dfm_acl)
+
+cat("\nDimensioni matrice ACL:", dim(mat_acl), "\n")
+
+# Controllo rapido per evitare errori se la matrice è troppo piccola
+if (ncol(mat_acl) < 2) {
+  stop("La matrice per l'ACL ha meno di 2 colonne: prova a ridurre 'min_docfreq'.")
+}
+
+# ------------------------------------------------
+# 15.2 Analisi CA
+# ------------------------------------------------
+res_ca <- CA(mat_acl, graph = FALSE)
+
+cat("\n--- Inerzia degli assi ---\n")
+print(res_ca$eig)
+
+# ------------------------------------------------
+# 15.3 Selezione parole più significative
+# ------------------------------------------------
+cont <- as.data.frame(res_ca$col$contrib)
+cont$term <- rownames(cont)
+
+# Controllo nomi colonne (opzionale, utile per debug)
+# print(colnames(cont))
+
+# Calcolo punteggio di importanza (asse 1 + asse 2)
+top_terms <- cont %>%
+  mutate(score = abs(`Dim 1`) + abs(`Dim 2`)) %>%
+  arrange(desc(score)) %>%
+  slice(1:40) %>%      # prendo le 40 più importanti
+  select(term, `Dim 1`, `Dim 2`, score)
+
+cat("\n--- Parole selezionate (prime 40 più significative) ---\n")
+print(top_terms)
+
+# ------------------------------------------------
+# 15.4 Grafico parole significative
+# ------------------------------------------------
+fviz_ca_col(
+  res_ca,
+  repel = TRUE,
+  label = "all",
+  select.col = list(name = top_terms$term),
+  col.col = "red3",
+  title = "ACL - Parole più significative (solo top 40)"
+)
+
+# ------------------------------------------------
+# 15.5 Biplot leggibile (testi + parole)
+# ------------------------------------------------
+fviz_ca_biplot(
+  res_ca,
+  repel = TRUE,
+  col.row = "grey70",
+  col.col = "blue",
+  select.col = list(name = top_terms$term),
+  label = "col",
+  title = "ACL - Biplot (solo parole più significative)"
+)
+
+```
+
+
+
+```{r}
+# ------------------------------------------------
+# PUNTATA 2 - STAGIONE 2 
+# ------------------------------------------------
+suppressPackageStartupMessages({
+  library(readr)
+  library(data.table)
+  library(dplyr)
+  library(udpipe)
+  library(quanteda)
+  library(quanteda.textplots)
+  library(RColorBrewer)
+  library(ggplot2)
+  library(tm)    # per findAssocs
+})
+
+# Imposta la cartella di lavoro
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+cat("Working directory:", getwd(), "\n")
+
+# -----------------------------
+# Leggi il file in modo robusto
+# -----------------------------
+file_path <- "openvarcom2.csv"
+if (!file.exists(file_path)) {
+  stop(paste0("File '", file_path, "' non trovato in ", getwd(), 
+              ". Controlla il percorso o sposta il file nella cartella di lavoro."))
+}
+
+read_attempt <- NULL
+
+# prova tab
+read_attempt <- tryCatch(
+  read_delim(file_path, delim = "\t", escape_double = FALSE, trim_ws = TRUE),
+  error = function(e) NULL
+)
+
+# prova virgola se tab fallisce
+if (is.null(read_attempt)) {
+  read_attempt <- tryCatch(
+    read_delim(file_path, delim = ",", escape_double = FALSE, trim_ws = TRUE),
+    error = function(e) NULL
+  )
+}
+
+# fallback a fread (auto-detect delimiter)
+if (is.null(read_attempt)) {
+  read_attempt <- tryCatch(
+    as.data.frame(fread(file_path, encoding = "UTF-8", data.table = FALSE), stringsAsFactors = FALSE),
+    error = function(e) NULL
+  )
+}
+
+if (is.null(read_attempt)) stop("Impossibile leggere il file con le strategie automatiche. Controlla il CSV.")
+
+openvarcom2_raw <- as.data.frame(read_attempt, stringsAsFactors = FALSE)
+cat("Colonne lette dal file:\n")
+print(names(openvarcom2_raw))
+
+# -----------------------------
+# Normalizza i nomi delle colonne (rimuove BOM / spazi / maiuscole)
+# -----------------------------
+clean_names <- names(openvarcom2_raw) %>%
+  # rimuove BOM se presente
+  gsub("\ufeff", "", .) %>%
+  trimws() %>%
+  tolower() %>%
+  gsub("[^[:alnum:]_]+", "_", .)
+
+names(openvarcom2_raw) <- clean_names
+cat("Nomi colonne normalizzati:\n")
+print(names(openvarcom2_raw))
+
+# -----------------------------
+# Trova la colonna di testo (anche se non si chiama esattamente 'text')
+# -----------------------------
+candidates <- c("text", "message", "comment", "body", "content", "testo")
+found <- intersect(names(openvarcom2_raw), candidates)
+
+if (length(found) == 0) {
+  idx <- grep("text|messag|comment|body|content|testo", names(openvarcom2_raw), ignore.case = TRUE)
+  if (length(idx) == 0) {
+    stop(paste0("Nessuna colonna di testo trovata. Colonne disponibili: ", paste(names(openvarcom2_raw), collapse = ", ")))
+  } else {
+    text_col <- names(openvarcom2_raw)[idx[1]]
+    message("Colonna di testo individuata automaticamente: '", text_col, "'. Verrà rinominata in 'text'.")
+    names(openvarcom2_raw)[idx[1]] <- "text"
+  }
+} else {
+  text_col <- found[1]
+  if (text_col != "text") {
+    message("Rinomino la colonna '", text_col, "' in 'text' per coerenza.")
+    names(openvarcom2_raw)[names(openvarcom2_raw) == text_col] <- "text"
+  } else {
+    message("Colonna 'text' trovata correttamente.")
+  }
+}
+
+# dataframe definitivo
+openvarcom2 <- openvarcom2_raw
+
+# -----------------------------
+# Rimuovo solo le colonne indesiderate se esistono (nomi già normalizzati)
+# -----------------------------
+cols_to_remove <- c("replycount", "likecount", "publishedat",
+                    "isreply", "isreplyto", "isreplytoname", "authorname")
+cols_present <- intersect(names(openvarcom2), cols_to_remove)
+if (length(cols_present) > 0) {
+  message("Rimuovo colonne presenti: ", paste(cols_present, collapse = ", "))
+  openvarcom2 <- openvarcom2 %>% select(-any_of(cols_present))
+} else {
+  message("Nessuna delle colonne opzionali da rimuovere era presente.")
+}
+
+# controllo finale colonna text
+if (! "text" %in% names(openvarcom2)) stop("Dopo le normalizzazioni non è stata trovata la colonna 'text'.")
+
+# -----------------------------
+# Pulizia testo
+# -----------------------------
+openvarcom2$text <- gsub("'", " ", openvarcom2$text)
+openvarcom2$text <- gsub("[^\x01-\x7F]", " ", openvarcom2$text)
+openvarcom2$text <- trimws(openvarcom2$text)
+
+# -----------------------------
+# Carico/usa modello UDPIPE (scarica solo la prima volta)
+# -----------------------------
+# Se hai già il modello scaricato commenta la riga con udpipe_download_model()
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# -----------------------------
+# Lemmatizzazione con udpipe
+# -----------------------------
+doc_ids <- as.character(seq_len(nrow(openvarcom2)))
+annot <- udpipe_annotate(ud_model, x = openvarcom2$text, doc_id = doc_ids)
+annoi_df <- as.data.frame(annot, stringsAsFactors = FALSE)
+
+# -----------------------------
+# Pulizia UPOS e stopwords extra
+# -----------------------------
+annoi_df$lemma[is.na(annoi_df$lemma)] <- ""
+remove_upos <- c("PUNCT", "ADP", "DET", "CCONJ", "SCONJ", "X", "PART", "SYM", "NUM", "INTJ")
+annoi_df <- annoi_df %>% filter(!(upos %in% remove_upos)) %>% filter(lemma != "")
+
+extra_stopwords <- c("che","si","io","non","avere","stare","fare","dire",
+                     "quello","essere","dovere","cosa","ci","che","si","io","non","avere","stare","fare",
+  "dire","quello","essere","dovere","cosa","ci",
+  "lo","poi","perch","altro","anche","tutto","solo","chi","il","lo","la","i","gli",
+  "le","di","a","da","in","con","l","I","mi","me","mo")
+keywords <- c("rigore","var","arbitro")
+
+# -----------------------------
+# Basic frequency stats (UDpipe) - escludo stopwords extra per i grafici
+# -----------------------------
+lemma_freq <- annoi_df %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  group_by(lemma) %>%
+  summarise(freq = n(), .groups = "drop") %>%
+  arrange(desc(freq))
+
+cat("\n--- Top 20 parole (UDPipe lemma frequency) ---\n")
+print(head(lemma_freq, 20))
+
+# Grafico top 20 parole
+top20_lemmas <- head(lemma_freq, 20)
+ggplot(top20_lemmas, aes(x = reorder(lemma, freq), y = freq)) +
+  geom_col(fill = "#D55E00") +
+  coord_flip() +
+  labs(title = "Top 20 parole più frequenti (UDPipe)",
+       x = "Parola", y = "Frequenza") +
+  theme_minimal(base_size = 14)
+
+# Grafico parole chiave
+key_freq <- lemma_freq %>% filter(lemma %in% keywords)
+if (nrow(key_freq) == 0) {
+  message("Nessuna delle parole chiave trovata in lemma_freq (dopo rimozione stopwords extra).")
+} else {
+  ggplot(key_freq, aes(x = reorder(lemma, freq), y = freq)) +
+    geom_col(fill = "#0072B2") +
+    coord_flip() +
+    labs(title = "Frequenza delle parole chiave",
+         x = "Parola chiave", y = "Frequenza") +
+    theme_minimal(base_size = 14)
+}
+
+# -----------------------------
+# Ricostruisco i documenti dai lemmi
+# -----------------------------
+texts_by_doc <- annoi_df %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop")
+
+all_docs <- data.frame(doc_id = doc_ids, stringsAsFactors = FALSE)
+texts_by_doc <- all_docs %>%
+  left_join(texts_by_doc, by = "doc_id") %>%
+  mutate(text = ifelse(is.na(text), "", text)) %>%
+  arrange(as.integer(doc_id))
+
+# -----------------------------
+# Corpus quanteda e tokenizzazione (NON rimuovere keywords)
+# -----------------------------
+corp <- corpus(texts_by_doc$text)
+tokens_clean <- tokens(corp, what = "word", remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(stopwords("italian"), extra_stopwords,
+                  # altre parole insignificanti da rimuovere (lascia keywords fuori)
+                  "cose","cosi","mano","mani","fa","piu","più","perche","perchè",
+                  "parte","parti","calcio","b","poi","gi","perch","cos",
+                  "x","d","pu","ogni","po","varre","pe","qui","no"))
+
+dfm_unigrams <- dfm(tokens_clean) %>% dfm_trim(min_termfreq = 1)
+
+cat("\n--- Top 20 parole (DFM unigrammi) ---\n")
+print(topfeatures(dfm_unigrams, 20))
+
+# -----------------------------
+# Grafico DFM top 20
+# -----------------------------
+top_vec <- topfeatures(dfm_unigrams, 20)
+top_terms <- data.frame(feature = names(top_vec), frequency = as.numeric(top_vec), stringsAsFactors = FALSE)
+
+ggplot(top_terms, aes(x = reorder(feature, frequency), y = frequency)) +
+  geom_col(fill = "#0072B2") +
+  coord_flip() +
+  labs(title = "Top 20 parole più frequenti (DFM unigrammi)", x = NULL, y = "Frequenza") +
+  theme_minimal(base_size = 14)
+
+# -----------------------------
+# Wordcloud
+# -----------------------------
+set.seed(123)
+textplot_wordcloud(dfm_unigrams, max_words = 50, random_order = FALSE, rotation = 0.25, color = brewer.pal(8, "Dark2"))
+
+# -----------------------------
+# Parole associate (findAssocs) - convert to tm
+# -----------------------------
+dfm_tm <- convert(dfm_unigrams, to = "tm")  # DocumentTermMatrix (tm)
+for (kw in keywords) {
+  cat("\n--- Parole associate a:", kw, "---\n")
+  if (!(kw %in% Terms(dfm_tm))) {
+    cat("Parola chiave non presente nel corpus.\n")
+  } else {
+    assoc <- findAssocs(dfm_tm, kw, corlimit = 0.3)
+    print(assoc)
+  }
+}
+
+cat("\nScript completato.\n")
+
+```
+
+
+
+```{r}
+# ------------------------------------------------
+# PUNTATA 3 - STAGIONE 2 
+# ------------------------------------------------
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+library(tm)
+
+# ------------------------------------------------
+# 0. Scarico e carico il modello italiano udpipe
+# ------------------------------------------------
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# ------------------------------------------------
+# 1. Imposto la cartella di lavoro
+# ------------------------------------------------
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+# ------------------------------------------------
+# 2. Importo il dataset (Puntata 3)
+# ------------------------------------------------
+openvarcom <- read_delim("openvarcom3.csv",
+                         delim = "\t",
+                         escape_double = FALSE,
+                         trim_ws = TRUE,
+                         show_col_types = FALSE)
+
+# ------------------------------------------------
+# 3. Identificazione automatica colonna testo
+# ------------------------------------------------
+text_col <- grep("text", names(openvarcom), ignore.case = TRUE, value = TRUE)
+
+if (length(text_col) == 0) {
+  stop("❌ Nessuna colonna testuale trovata!")
+}
+
+openvarcom <- openvarcom %>% rename(text = all_of(text_col))
+
+# ------------------------------------------------
+# 4. Rimuovo colonne inutili (solo se esistono)
+# ------------------------------------------------
+cols_to_remove <- c("replyCount", "likeCount", "publishedAt",
+                    "isReply", "isReplyTo", "isReplyToName", "authorName")
+
+openvarcom_clean <- openvarcom %>% select(-all_of(intersect(cols_to_remove, names(openvarcom))))
+
+# ------------------------------------------------
+# 5. Pulizia testo
+# ------------------------------------------------
+openvarcom_clean$text <- gsub("'", " ", openvarcom_clean$text)
+openvarcom_clean$text <- gsub("[^\x01-\x7F]", " ", openvarcom_clean$text)
+openvarcom_clean$text <- trimws(openvarcom_clean$text)
+
+# ------------------------------------------------
+# 6. Lemmatizzazione
+# ------------------------------------------------
+doc_ids <- as.character(seq_len(nrow(openvarcom_clean)))
+annot <- udpipe_annotate(ud_model, x = openvarcom_clean$text, doc_id = doc_ids)
+annoi_df <- as.data.frame(annot)
+
+# ------------------------------------------------
+# 7. Pulizia UPOS
+# ------------------------------------------------
+remove_upos <- c("PUNCT","ADP","DET","CCONJ","SCONJ","X","PART","SYM","NUM","INTJ")
+annoi_df <- annoi_df %>% 
+  filter(!(upos %in% remove_upos)) %>%
+  filter(!is.na(lemma), lemma != "")
+
+# Stopwords aggiuntive
+extra_stopwords <- c("che","si","io","non","avere","stare","fare",
+                     "dire","quello","essere","dovere","cosa","ci","che","si","io","non","avere","stare","fare",
+  "dire","quello","essere","dovere","cosa","ci",
+  "lo","poi","perch","altro","anche","tutto","solo","chi","il","lo","la","i","gli",
+  "le","di","a","da","in","con","l","I","mi","me","mo")
+
+# ------------------------------------------------
+# 8. Frequenze lemma
+# ------------------------------------------------
+lemma_freq <- annoi_df %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  count(lemma, name = "freq") %>%
+  arrange(desc(freq))
+
+cat("\n--- Top 20 lemmi ---\n")
+print(head(lemma_freq, 20))
+
+# Grafico frequenze lemmi
+if (nrow(lemma_freq) > 0) {
+  ggplot(head(lemma_freq, 20), aes(x = reorder(lemma, freq), y = freq)) +
+    geom_col(fill = "#D55E00") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (UDPipe)", x = "Lemma", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessun lemma disponibile per il grafico.\n")
+}
+
+# ------------------------------------------------
+# 9. Corpus quanteda
+# ------------------------------------------------
+texts_by_doc <- annoi_df %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop")
+
+corp <- corpus(texts_by_doc$text)
+
+# ------------------------------------------------
+# 10. Tokenizzazione
+# ------------------------------------------------
+tokens_clean <- tokens(corp,
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(stopwords("italian"), extra_stopwords))
+
+dfm_unigrams <- dfm(tokens_clean)
+
+# ------------------------------------------------
+# 11. Grafico frequenze DFM
+# ------------------------------------------------
+top20 <- topfeatures(dfm_unigrams, 20)
+
+if (length(top20) > 0) {
+  df_top <- data.frame(feature = names(top20), freq = as.numeric(top20))
+  
+  ggplot(df_top, aes(x = reorder(feature, freq), y = freq)) +
+    geom_col(fill = "#0072B2") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (DFM)", x = "Termine", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessuna parola nella DFM.\n")
+}
+
+# ------------------------------------------------
+# 12. Wordcloud
+# ------------------------------------------------
+if (nfeat(dfm_unigrams) > 0) {
+  textplot_wordcloud(dfm_unigrams, max_words = 50,
+                     color = brewer.pal(8, "Dark2"))
+} else {
+  cat("\n⚠ Niente da mostrare nella wordcloud.\n")
+}
+
+```
+
+```{r}
+# ------------------------------------------------
+# PUNTATA 4 - STAGIONE 2
+# ------------------------------------------------
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+library(tm)
+
+# ------------------------------------------------
+# 0. Scarico e carico il modello italiano udpipe
+# ------------------------------------------------
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# ------------------------------------------------
+# 1. Imposto la cartella di lavoro
+# ------------------------------------------------
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+# ------------------------------------------------
+# 2. Importo il dataset (Puntata 4)
+# ------------------------------------------------
+openvarcom <- read_delim("openvarcom4.csv",
+                         delim = "\t",
+                         escape_double = FALSE,
+                         trim_ws = TRUE,
+                         show_col_types = FALSE)
+
+# ------------------------------------------------
+# 3. Identificazione automatica colonna testo
+# ------------------------------------------------
+text_col <- grep("text", names(openvarcom), ignore.case = TRUE, value = TRUE)
+
+if (length(text_col) == 0) {
+  stop("❌ Nessuna colonna testuale trovata!")
+}
+
+openvarcom <- openvarcom %>% rename(text = all_of(text_col))
+
+# ------------------------------------------------
+# 4. Rimuovo colonne inutili (se presenti)
+# ------------------------------------------------
+cols_to_remove <- c("replyCount", "likeCount", "publishedAt",
+                    "isReply", "isReplyTo", "isReplyToName", "authorName")
+
+openvarcom_clean <- openvarcom %>% 
+  select(-all_of(intersect(cols_to_remove, names(openvarcom))))
+
+# ------------------------------------------------
+# 5. Pulizia testo
+# ------------------------------------------------
+openvarcom_clean$text <- gsub("'", " ", openvarcom_clean$text)
+openvarcom_clean$text <- gsub("[^\x01-\x7F]", " ", openvarcom_clean$text)
+openvarcom_clean$text <- trimws(openvarcom_clean$text)
+
+# ------------------------------------------------
+# 6. Lemmatizzazione con UDPipe
+# ------------------------------------------------
+doc_ids <- as.character(seq_len(nrow(openvarcom_clean)))
+annot <- udpipe_annotate(ud_model, 
+                         x = openvarcom_clean$text, 
+                         doc_id = doc_ids)
+annoi_df <- as.data.frame(annot)
+
+# ------------------------------------------------
+# 7. Pulizia UPOS + stopwords extra
+# ------------------------------------------------
+remove_upos <- c("PUNCT","ADP","DET","CCONJ","SCONJ",
+                 "X","PART","SYM","NUM","INTJ")
+
+annoi_df <- annoi_df %>% 
+  filter(!(upos %in% remove_upos)) %>% 
+  filter(!is.na(lemma), lemma != "")
+
+extra_stopwords <- c("che","si","io","non","avere","stare","fare",
+                     "dire","quello","essere","dovere","cosa","ci",
+  "dire","quello","essere","dovere","cosa","ci",
+  "lo","poi","perch","altro","anche","tutto","solo","chi","il","lo","la","i","gli",
+  "le","di","a","da","in","con","l","I","mi","me","mo","ti","to")
+
+# ------------------------------------------------
+# 7b. Rimuovo lemmi lunghi (>15 caratteri)
+# ------------------------------------------------
+annoi_df <- annoi_df %>% 
+  filter(nchar(lemma) <= 15)
+
+# ------------------------------------------------
+# 8. Frequenze lemmi
+# ------------------------------------------------
+lemma_freq <- annoi_df %>% 
+  filter(!tolower(lemma) %in% extra_stopwords) %>% 
+  count(lemma, name = "freq") %>% 
+  arrange(desc(freq))
+
+cat("\n--- Top 20 lemmi ---\n")
+print(head(lemma_freq, 20))
+
+if (nrow(lemma_freq) > 0) {
+  ggplot(head(lemma_freq, 20),
+         aes(x = reorder(lemma, freq), y = freq)) +
+    geom_col(fill = "#D55E00") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (UDPipe)",
+         x = "Lemma", y = "Frequenza")
+}
+
+# ------------------------------------------------
+# 9. Corpus quanteda
+# ------------------------------------------------
+texts_by_doc <- annoi_df %>% 
+  group_by(doc_id) %>% 
+  summarise(text = paste(lemma, collapse = " "),
+            .groups = "drop")
+
+corp <- corpus(texts_by_doc$text)
+
+# ------------------------------------------------
+# 10. Tokenizzazione
+# ------------------------------------------------
+tokens_clean <- tokens(corp,
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>% 
+  tokens_tolower() %>% 
+  tokens_remove(c(stopwords("italian"), extra_stopwords))
+
+dfm_unigrams <- dfm(tokens_clean)
+
+# ------------------------------------------------
+# 11. Frequenze (DFM)
+# ------------------------------------------------
+top20 <- topfeatures(dfm_unigrams, 20)
+
+if (length(top20) > 0) {
+  df_top <- data.frame(
+    feature = names(top20),
+    freq = as.numeric(top20)
+  )
+  
+  ggplot(df_top,
+         aes(x = reorder(feature, freq), y = freq)) +
+    geom_col(fill = "#0072B2") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (DFM)",
+         x = "Termine", y = "Frequenza")
+}
+
+# ------------------------------------------------
+# 12. Wordcloud
+# ------------------------------------------------
+if (nfeat(dfm_unigrams) > 0) {
+  textplot_wordcloud(dfm_unigrams,
+                     max_words = 50,
+                     color = brewer.pal(8, "Dark2"))
+} else {
+  cat("\n⚠ Niente da mostrare nella wordcloud.\n")
+}
+
+```
+
+```{r}
+# ------------------------------------------------
+# PUNTATA 5 - STAGIONE 2
+# ------------------------------------------------
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+library(tm)
+
+# ------------------------------------------------
+# 0. Scarico e carico il modello italiano udpipe
+# ------------------------------------------------
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# ------------------------------------------------
+# 1. Imposto la cartella di lavoro
+# ------------------------------------------------
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+# ------------------------------------------------
+# 2. Importo il dataset (Puntata 5)
+# ------------------------------------------------
+openvarcom <- read_delim("openvarcom5.csv",
+                         delim = "\t",
+                         escape_double = FALSE,
+                         trim_ws = TRUE,
+                         show_col_types = FALSE)
+
+# ------------------------------------------------
+# 3. Identificazione automatica colonna testo
+# ------------------------------------------------
+text_col <- grep("text", names(openvarcom), ignore.case = TRUE, value = TRUE)
+
+if (length(text_col) == 0) {
+  stop("❌ Nessuna colonna testuale trovata!")
+}
+
+openvarcom <- openvarcom %>% rename(text = all_of(text_col))
+
+# ------------------------------------------------
+# 4. Rimuovo colonne inutili (solo se esistono)
+# ------------------------------------------------
+cols_to_remove <- c("replyCount", "likeCount", "publishedAt",
+                    "isReply", "isReplyTo", "isReplyToName", "authorName")
+
+openvarcom_clean <- openvarcom %>% select(-all_of(intersect(cols_to_remove, names(openvarcom))))
+
+# ------------------------------------------------
+# 5. Pulizia testo
+# ------------------------------------------------
+openvarcom_clean$text <- gsub("'", " ", openvarcom_clean$text)
+openvarcom_clean$text <- gsub("[^\x01-\x7F]", " ", openvarcom_clean$text)
+openvarcom_clean$text <- trimws(openvarcom_clean$text)
+
+# ------------------------------------------------
+# 6. Lemmatizzazione
+# ------------------------------------------------
+doc_ids <- as.character(seq_len(nrow(openvarcom_clean)))
+annot <- udpipe_annotate(ud_model, x = openvarcom_clean$text, doc_id = doc_ids)
+annoi_df <- as.data.frame(annot)
+
+# ------------------------------------------------
+# 7. Pulizia UPOS
+# ------------------------------------------------
+remove_upos <- c("PUNCT","ADP","DET","CCONJ","SCONJ","X","PART","SYM","NUM","INTJ")
+annoi_df <- annoi_df %>% 
+  filter(!(upos %in% remove_upos)) %>%
+  filter(!is.na(lemma), lemma != "")
+
+# Stopwords aggiuntive
+extra_stopwords <- c("che","si","io","non","avere","stare","fare",
+                     "dire","quello","essere","dovere","cosa","ci",
+  "lo","poi","perch","altro","anche","tutto","solo","chi","il","lo","la","i","gli",
+  "le","di","a","da","in","con","l","I","mi","me","mo","ti","to","questo","quello","quella")
+
+# ------------------------------------------------
+# 8. Frequenze lemma
+# ------------------------------------------------
+lemma_freq <- annoi_df %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  count(lemma, name = "freq") %>%
+  arrange(desc(freq))
+
+cat("\n--- Top 20 lemmi ---\n")
+print(head(lemma_freq, 20))
+
+# Grafico frequenze lemmi
+if (nrow(lemma_freq) > 0) {
+  ggplot(head(lemma_freq, 20), aes(x = reorder(lemma, freq), y = freq)) +
+    geom_col(fill = "#D55E00") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (UDPipe)", x = "Lemma", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessun lemma disponibile per il grafico.\n")
+}
+
+# ------------------------------------------------
+# 9. Corpus quanteda
+# ------------------------------------------------
+texts_by_doc <- annoi_df %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop")
+
+corp <- corpus(texts_by_doc$text)
+
+# ------------------------------------------------
+# 10. Tokenizzazione
+# ------------------------------------------------
+tokens_clean <- tokens(corp,
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(stopwords("italian"), extra_stopwords))
+
+dfm_unigrams <- dfm(tokens_clean)
+
+# ------------------------------------------------
+# 11. Grafico frequenze DFM
+# ------------------------------------------------
+top20 <- topfeatures(dfm_unigrams, 20)
+
+if (length(top20) > 0) {
+  df_top <- data.frame(feature = names(top20), freq = as.numeric(top20))
+  
+  ggplot(df_top, aes(x = reorder(feature, freq), y = freq)) +
+    geom_col(fill = "#0072B2") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (DFM)", x = "Termine", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessuna parola nella DFM.\n")
+}
+
+# ------------------------------------------------
+# 12. Wordcloud
+# ------------------------------------------------
+if (nfeat(dfm_unigrams) > 0) {
+  textplot_wordcloud(dfm_unigrams, max_words = 50,
+                     color = brewer.pal(8, "Dark2"))
+} else {
+  cat("\n⚠ Niente da mostrare nella wordcloud.\n")
+}
+
+```
+
+
+
+```{r}
+# ------------------------------------------------
+# PUNTATA 1 - STAGIONE 1 
+# ------------------------------------------------
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+library(tm)
+
+# ------------------------------------------------
+# 0. Scarico e carico il modello italiano udpipe
+# ------------------------------------------------
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# ------------------------------------------------
+# 1. Imposto la cartella di lavoro
+# ------------------------------------------------
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+# ------------------------------------------------
+# 2. Importo il dataset (Puntata 11)
+# ------------------------------------------------
+openvarcom <- read_delim("openvarcom11.csv",
+                         delim = "\t",
+                         escape_double = FALSE,
+                         trim_ws = TRUE,
+                         show_col_types = FALSE)
+
+# ------------------------------------------------
+# 3. Identificazione automatica colonna testo
+# ------------------------------------------------
+text_col <- grep("text", names(openvarcom), ignore.case = TRUE, value = TRUE)
+
+if (length(text_col) == 0) {
+  stop("❌ Nessuna colonna testuale trovata!")
+}
+
+openvarcom <- openvarcom %>% rename(text = all_of(text_col))
+
+# ------------------------------------------------
+# 4. Rimuovo colonne inutili (solo se esistono)
+# ------------------------------------------------
+cols_to_remove <- c("replyCount", "likeCount", "publishedAt",
+                    "isReply", "isReplyTo", "isReplyToName", "authorName")
+
+openvarcom_clean <- openvarcom %>% select(-all_of(intersect(cols_to_remove, names(openvarcom))))
+
+# ------------------------------------------------
+# 5. Pulizia testo
+# ------------------------------------------------
+openvarcom_clean$text <- gsub("'", " ", openvarcom_clean$text)
+openvarcom_clean$text <- gsub("[^\x01-\x7F]", " ", openvarcom_clean$text)
+openvarcom_clean$text <- trimws(openvarcom_clean$text)
+
+# ------------------------------------------------
+# 6. Lemmatizzazione
+# ------------------------------------------------
+doc_ids <- as.character(seq_len(nrow(openvarcom_clean)))
+annot <- udpipe_annotate(ud_model, x = openvarcom_clean$text, doc_id = doc_ids)
+annoi_df <- as.data.frame(annot)
+
+# ------------------------------------------------
+# 7. Pulizia UPOS
+# ------------------------------------------------
+remove_upos <- c("PUNCT","ADP","DET","CCONJ","SCONJ","X","PART","SYM","NUM","INTJ")
+annoi_df <- annoi_df %>% 
+  filter(!(upos %in% remove_upos)) %>%
+  filter(!is.na(lemma), lemma != "")
+
+# Stopwords aggiuntive
+extra_stopwords <- c("che","si","io","non","avere","stare","fare",
+                     "dire","quello","essere","dovere","cosa","ci",
+  "lo","poi","perch","altro","anche","tutto","solo","chi","il","lo","la","i","gli",
+  "le","di","a","da","in","con","l","I","mi","me","mo","ti","to","questo","questa","quello","quella")
+
+# ------------------------------------------------
+# 8. Frequenze lemma
+# ------------------------------------------------
+lemma_freq <- annoi_df %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  count(lemma, name = "freq") %>%
+  arrange(desc(freq))
+
+cat("\n--- Top 20 lemmi ---\n")
+print(head(lemma_freq, 20))
+
+# Grafico frequenze lemmi
+if (nrow(lemma_freq) > 0) {
+  ggplot(head(lemma_freq, 20), aes(x = reorder(lemma, freq), y = freq)) +
+    geom_col(fill = "#D55E00") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (UDPipe)", x = "Lemma", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessun lemma disponibile per il grafico.\n")
+}
+
+# ------------------------------------------------
+# 9. Corpus quanteda
+# ------------------------------------------------
+texts_by_doc <- annoi_df %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop")
+
+corp <- corpus(texts_by_doc$text)
+
+# ------------------------------------------------
+# 10. Tokenizzazione
+# ------------------------------------------------
+tokens_clean <- tokens(corp,
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(stopwords("italian"), extra_stopwords))
+
+dfm_unigrams <- dfm(tokens_clean)
+
+# ------------------------------------------------
+# 11. Grafico frequenze DFM
+# ------------------------------------------------
+top20 <- topfeatures(dfm_unigrams, 20)
+
+if (length(top20) > 0) {
+  df_top <- data.frame(feature = names(top20), freq = as.numeric(top20))
+  
+  ggplot(df_top, aes(x = reorder(feature, freq), y = freq)) +
+    geom_col(fill = "#0072B2") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (DFM)", x = "Termine", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessuna parola nella DFM.\n")
+}
+
+# ------------------------------------------------
+# 12. Wordcloud
+# ------------------------------------------------
+if (nfeat(dfm_unigrams) > 0) {
+  textplot_wordcloud(dfm_unigrams, max_words = 50,
+                     color = brewer.pal(8, "Dark2"))
+} else {
+  cat("\n⚠ Niente da mostrare nella wordcloud.\n")
+}
+
+```
+
+
+```{r}
+# ------------------------------------------------
+# PUNTATA 2 - STAGIONE 1 
+# ------------------------------------------------
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+library(tm)
+
+# ------------------------------------------------
+# 0. Scarico e carico il modello italiano udpipe
+# ------------------------------------------------
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# ------------------------------------------------
+# 1. Imposto la cartella di lavoro
+# ------------------------------------------------
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+# ------------------------------------------------
+# 2. Importo il dataset (Puntata 12)
+# ------------------------------------------------
+openvarcom <- read_delim("openvarcom12.csv",
+                         delim = "\t",
+                         escape_double = FALSE,
+                         trim_ws = TRUE,
+                         show_col_types = FALSE)
+
+# ------------------------------------------------
+# 3. Identificazione automatica colonna testo
+# ------------------------------------------------
+text_col <- grep("text", names(openvarcom), ignore.case = TRUE, value = TRUE)
+
+if (length(text_col) == 0) {
+  stop("❌ Nessuna colonna testuale trovata!")
+}
+
+openvarcom <- openvarcom %>% rename(text = all_of(text_col))
+
+# ------------------------------------------------
+# 4. Rimuovo colonne inutili (solo se esistono)
+# ------------------------------------------------
+cols_to_remove <- c("replyCount", "likeCount", "publishedAt",
+                    "isReply", "isReplyTo", "isReplyToName", "authorName")
+
+openvarcom_clean <- openvarcom %>% select(-all_of(intersect(cols_to_remove, names(openvarcom))))
+
+# ------------------------------------------------
+# 5. Pulizia testo
+# ------------------------------------------------
+openvarcom_clean$text <- gsub("'", " ", openvarcom_clean$text)
+openvarcom_clean$text <- gsub("[^\x01-\x7F]", " ", openvarcom_clean$text)
+openvarcom_clean$text <- trimws(openvarcom_clean$text)
+
+# ------------------------------------------------
+# 6. Lemmatizzazione
+# ------------------------------------------------
+doc_ids <- as.character(seq_len(nrow(openvarcom_clean)))
+annot <- udpipe_annotate(ud_model, x = openvarcom_clean$text, doc_id = doc_ids)
+annoi_df <- as.data.frame(annot)
+
+# ------------------------------------------------
+# 7. Pulizia UPOS
+# ------------------------------------------------
+remove_upos <- c("PUNCT","ADP","DET","CCONJ","SCONJ","X","PART","SYM","NUM","INTJ")
+annoi_df <- annoi_df %>% 
+  filter(!(upos %in% remove_upos)) %>%
+  filter(!is.na(lemma), lemma != "")
+
+# Stopwords aggiuntive
+extra_stopwords <- c("che","si","io","non","avere","stare","fare",
+                     "dire","quello","essere","dovere","cosa","ci",
+  "lo","poi","perch","altro","anche","tutto","solo","chi","il","lo","la","i","gli",
+  "le","di","a","da","in","con","l","I","mi","me","mo","ti","to","questo","questa","quello","quella")
+
+# ------------------------------------------------
+# 7b. Rimuovo lemmi troppo lunghi (>15 caratteri)
+# ------------------------------------------------
+annoi_df <- annoi_df %>%
+  filter(nchar(lemma) <= 15)
+
+# ------------------------------------------------
+# 8. Frequenze lemma
+# ------------------------------------------------
+lemma_freq <- annoi_df %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  count(lemma, name = "freq") %>%
+  arrange(desc(freq))
+
+cat("\n--- Top 20 lemmi ---\n")
+print(head(lemma_freq, 20))
+
+# Grafico frequenze lemmi
+if (nrow(lemma_freq) > 0) {
+  ggplot(head(lemma_freq, 20), aes(x = reorder(lemma, freq), y = freq)) +
+    geom_col(fill = "#D55E00") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (UDPipe)", x = "Lemma", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessun lemma disponibile per il grafico.\n")
+}
+
+# ------------------------------------------------
+# 9. Corpus quanteda
+# ------------------------------------------------
+texts_by_doc <- annoi_df %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop")
+
+corp <- corpus(texts_by_doc$text)
+
+# ------------------------------------------------
+# 10. Tokenizzazione
+# ------------------------------------------------
+tokens_clean <- tokens(corp,
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(stopwords("italian"), extra_stopwords))
+
+dfm_unigrams <- dfm(tokens_clean)
+
+# ------------------------------------------------
+# 11. Grafico frequenze DFM
+# ------------------------------------------------
+top20 <- topfeatures(dfm_unigrams, 20)
+
+if (length(top20) > 0) {
+  df_top <- data.frame(feature = names(top20), freq = as.numeric(top20))
+  
+  ggplot(df_top, aes(x = reorder(feature, freq), y = freq)) +
+    geom_col(fill = "#0072B2") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (DFM)", x = "Termine", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessuna parola nella DFM.\n")
+}
+
+# ------------------------------------------------
+# 12. Wordcloud
+# ------------------------------------------------
+if (nfeat(dfm_unigrams) > 0) {
+  textplot_wordcloud(dfm_unigrams, max_words = 50,
+                     color = brewer.pal(8, "Dark2"))
+} else {
+  cat("\n⚠ Niente da mostrare nella wordcloud.\n")
+}
+
+```
+
+
+```{r}
+# ------------------------------------------------
+# PUNTATA 3 - STAGIONE 1 
+# ------------------------------------------------
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+library(tm)
+
+# ------------------------------------------------
+# 0. Scarico e carico il modello italiano udpipe
+# ------------------------------------------------
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# ------------------------------------------------
+# 1. Imposto la cartella di lavoro
+# ------------------------------------------------
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+# ------------------------------------------------
+# 2. Importo il dataset (Puntata 13)
+# ------------------------------------------------
+openvarcom <- read_delim("openvarcom13.csv",
+                         delim = "\t",
+                         escape_double = FALSE,
+                         trim_ws = TRUE,
+                         show_col_types = FALSE)
+
+# ------------------------------------------------
+# 3. Identificazione automatica colonna testo
+# ------------------------------------------------
+text_col <- grep("text", names(openvarcom), ignore.case = TRUE, value = TRUE)
+
+if (length(text_col) == 0) {
+  stop("❌ Nessuna colonna testuale trovata!")
+}
+
+openvarcom <- openvarcom %>% rename(text = all_of(text_col))
+
+# ------------------------------------------------
+# 4. Rimuovo colonne inutili (solo se esistono)
+# ------------------------------------------------
+cols_to_remove <- c("replyCount", "likeCount", "publishedAt",
+                    "isReply", "isReplyTo", "isReplyToName", "authorName")
+
+openvarcom_clean <- openvarcom %>% select(-all_of(intersect(cols_to_remove, names(openvarcom))))
+
+# ------------------------------------------------
+# 5. Pulizia testo
+# ------------------------------------------------
+openvarcom_clean$text <- gsub("'", " ", openvarcom_clean$text)
+openvarcom_clean$text <- gsub("[^\x01-\x7F]", " ", openvarcom_clean$text)
+openvarcom_clean$text <- trimws(openvarcom_clean$text)
+
+# ------------------------------------------------
+# 6. Lemmatizzazione
+# ------------------------------------------------
+doc_ids <- as.character(seq_len(nrow(openvarcom_clean)))
+annot <- udpipe_annotate(ud_model, x = openvarcom_clean$text, doc_id = doc_ids)
+annoi_df <- as.data.frame(annot)
+
+# ------------------------------------------------
+# 7. Pulizia UPOS
+# ------------------------------------------------
+remove_upos <- c("PUNCT","ADP","DET","CCONJ","SCONJ","X","PART","SYM","NUM","INTJ")
+annoi_df <- annoi_df %>% 
+  filter(!(upos %in% remove_upos)) %>%
+  filter(!is.na(lemma), lemma != "")
+
+# Stopwords aggiuntive
+extra_stopwords <- c("che","si","io","non","avere","stare","fare",
+                     "dire","quello","essere","dovere","cosa","ci",
+  "lo","poi","perch","altro","anche","tutto","solo","chi","il","lo","la","i","gli",
+  "le","di","a","da","in","con","l","I","mi","me","mo","ti","to","questo","questa","quello","quella")
+
+# ------------------------------------------------
+# 7b. Rimuovo lemmi troppo lunghi (>15 caratteri)
+# ------------------------------------------------
+annoi_df <- annoi_df %>%
+  filter(nchar(lemma) <= 15)
+
+# ------------------------------------------------
+# 8. Frequenze lemma
+# ------------------------------------------------
+lemma_freq <- annoi_df %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  count(lemma, name = "freq") %>%
+  arrange(desc(freq))
+
+cat("\n--- Top 20 lemmi ---\n")
+print(head(lemma_freq, 20))
+
+# Grafico frequenze lemmi
+if (nrow(lemma_freq) > 0) {
+  ggplot(head(lemma_freq, 20), aes(x = reorder(lemma, freq), y = freq)) +
+    geom_col(fill = "#D55E00") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (UDPipe)", x = "Lemma", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessun lemma disponibile per il grafico.\n")
+}
+
+# ------------------------------------------------
+# 9. Corpus quanteda
+# ------------------------------------------------
+texts_by_doc <- annoi_df %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop")
+
+corp <- corpus(texts_by_doc$text)
+
+# ------------------------------------------------
+# 10. Tokenizzazione
+# ------------------------------------------------
+tokens_clean <- tokens(corp,
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(stopwords("italian"), extra_stopwords))
+
+dfm_unigrams <- dfm(tokens_clean)
+
+# ------------------------------------------------
+# 11. Grafico frequenze DFM
+# ------------------------------------------------
+top20 <- topfeatures(dfm_unigrams, 20)
+
+if (length(top20) > 0) {
+  df_top <- data.frame(feature = names(top20), freq = as.numeric(top20))
+  
+  ggplot(df_top, aes(x = reorder(feature, freq), y = freq)) +
+    geom_col(fill = "#0072B2") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (DFM)", x = "Termine", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessuna parola nella DFM.\n")
+}
+
+# ------------------------------------------------
+# 12. Wordcloud
+# ------------------------------------------------
+if (nfeat(dfm_unigrams) > 0) {
+  textplot_wordcloud(dfm_unigrams, max_words = 50,
+                     color = brewer.pal(8, "Dark2"))
+} else {
+  cat("\n⚠ Niente da mostrare nella wordcloud.\n")
+}
+
+```
+
+
+```{r}
+# ------------------------------------------------
+# PUNTATA 4 - STAGIONE 1 
+# ------------------------------------------------
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+library(tm)
+
+# ------------------------------------------------
+# 0. Scarico e carico il modello italiano udpipe
+# ------------------------------------------------
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# ------------------------------------------------
+# 1. Imposto la cartella di lavoro
+# ------------------------------------------------
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+# ------------------------------------------------
+# 2. Importo il dataset (Puntata 14)
+# ------------------------------------------------
+openvarcom <- read_delim("openvarcom14.csv",
+                         delim = "\t",
+                         escape_double = FALSE,
+                         trim_ws = TRUE,
+                         show_col_types = FALSE)
+
+# ------------------------------------------------
+# 3. Identificazione automatica colonna testo
+# ------------------------------------------------
+text_col <- grep("text", names(openvarcom), ignore.case = TRUE, value = TRUE)
+
+if (length(text_col) == 0) {
+  stop("❌ Nessuna colonna testuale trovata!")
+}
+
+openvarcom <- openvarcom %>% rename(text = all_of(text_col))
+
+# ------------------------------------------------
+# 4. Rimuovo colonne inutili (solo se esistono)
+# ------------------------------------------------
+cols_to_remove <- c("replyCount", "likeCount", "publishedAt",
+                    "isReply", "isReplyTo", "isReplyToName", "authorName")
+
+openvarcom_clean <- openvarcom %>% select(-all_of(intersect(cols_to_remove, names(openvarcom))))
+
+# ------------------------------------------------
+# 5. Pulizia testo
+# ------------------------------------------------
+openvarcom_clean$text <- gsub("'", " ", openvarcom_clean$text)
+openvarcom_clean$text <- gsub("[^\x01-\x7F]", " ", openvarcom_clean$text)
+openvarcom_clean$text <- trimws(openvarcom_clean$text)
+
+# ------------------------------------------------
+# 6. Lemmatizzazione
+# ------------------------------------------------
+doc_ids <- as.character(seq_len(nrow(openvarcom_clean)))
+annot <- udpipe_annotate(ud_model, x = openvarcom_clean$text, doc_id = doc_ids)
+annoi_df <- as.data.frame(annot)
+
+# ------------------------------------------------
+# 7. Pulizia UPOS
+# ------------------------------------------------
+remove_upos <- c("PUNCT","ADP","DET","CCONJ","SCONJ","X","PART","SYM","NUM","INTJ")
+annoi_df <- annoi_df %>% 
+  filter(!(upos %in% remove_upos)) %>%
+  filter(!is.na(lemma), lemma != "")
+
+# Stopwords aggiuntive
+extra_stopwords <- c("che","si","io","non","avere","stare","fare",
+                     "dire","quello","essere","dovere","cosa","ci",
+  "lo","poi","perch","altro","anche","tutto","solo","chi","il","lo","la","i","gli",
+  "le","di","a","da","in","con","l","I","mi","me","mo","ti","to","questo","questa","quello","quella")
+
+# ------------------------------------------------
+# 7b. Rimuovo lemmi troppo lunghi (>15 caratteri)
+# ------------------------------------------------
+annoi_df <- annoi_df %>%
+  filter(nchar(lemma) <= 15)
+
+# ------------------------------------------------
+# 8. Frequenze lemma
+# ------------------------------------------------
+lemma_freq <- annoi_df %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  count(lemma, name = "freq") %>%
+  arrange(desc(freq))
+
+cat("\n--- Top 20 lemmi ---\n")
+print(head(lemma_freq, 20))
+
+# Grafico frequenze lemmi
+if (nrow(lemma_freq) > 0) {
+  ggplot(head(lemma_freq, 20), aes(x = reorder(lemma, freq), y = freq)) +
+    geom_col(fill = "#D55E00") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (UDPipe)", x = "Lemma", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessun lemma disponibile per il grafico.\n")
+}
+
+# ------------------------------------------------
+# 9. Corpus quanteda
+# ------------------------------------------------
+texts_by_doc <- annoi_df %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop")
+
+corp <- corpus(texts_by_doc$text)
+
+# ------------------------------------------------
+# 10. Tokenizzazione
+# ------------------------------------------------
+tokens_clean <- tokens(corp,
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(stopwords("italian"), extra_stopwords))
+
+dfm_unigrams <- dfm(tokens_clean)
+
+# ------------------------------------------------
+# 11. Grafico frequenze DFM
+# ------------------------------------------------
+top20 <- topfeatures(dfm_unigrams, 20)
+
+if (length(top20) > 0) {
+  df_top <- data.frame(feature = names(top20), freq = as.numeric(top20))
+  
+  ggplot(df_top, aes(x = reorder(feature, freq), y = freq)) +
+    geom_col(fill = "#0072B2") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (DFM)", x = "Termine", y = "Frequenza")
+} else {
+  cat("\n⚠ Nessuna parola nella DFM.\n")
+}
+
+# ------------------------------------------------
+# 12. Wordcloud
+# ------------------------------------------------
+if (nfeat(dfm_unigrams) > 0) {
+  textplot_wordcloud(dfm_unigrams, max_words = 50,
+                     color = brewer.pal(8, "Dark2"))
+} else {
+  cat("\n⚠ Niente da mostrare nella wordcloud.\n")
+}
+
+```
+
+
+```{r}
+# ------------------------------------------------
+# PUNTATA 5 - STAGIONE 1 
+# ------------------------------------------------
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+library(tm)
+
+# ------------------------------------------------
+# 0. Scarico e carico il modello italiano udpipe
+# ------------------------------------------------
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# ------------------------------------------------
+# 1. Imposto la cartella di lavoro
+# ------------------------------------------------
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+# ------------------------------------------------
+# 2. Importo il dataset (Puntata 15)
+# ------------------------------------------------
+openvarcom <- read_delim("openvarcom15.csv",
+                         delim = "\t",
+                         escape_double = FALSE,
+                         trim_ws = TRUE,
+                         show_col_types = FALSE)
+
+# ------------------------------------------------
+# 3. Identificazione automatica colonna testo
+# ------------------------------------------------
+text_col <- grep("text", names(openvarcom), ignore.case = TRUE, value = TRUE)
+
+if (length(text_col) == 0) {
+  stop("❌ Nessuna colonna testuale trovata!")
+}
+
+openvarcom <- openvarcom %>% rename(text = all_of(text_col))
+
+# ------------------------------------------------
+# 4. Rimuovo colonne inutili (se esistono)
+# ------------------------------------------------
+cols_to_remove <- c("replyCount", "likeCount", "publishedAt",
+                    "isReply", "isReplyTo", "isReplyToName", "authorName")
+
+openvarcom_clean <- openvarcom %>% 
+  select(-all_of(intersect(cols_to_remove, names(openvarcom))))
+
+# ------------------------------------------------
+# 5. Pulizia testo
+# ------------------------------------------------
+openvarcom_clean$text <- gsub("'", " ", openvarcom_clean$text)
+openvarcom_clean$text <- gsub("[^\x01-\x7F]", " ", openvarcom_clean$text)
+openvarcom_clean$text <- trimws(openvarcom_clean$text)
+
+# ------------------------------------------------
+# 6. Lemmatizzazione con UDPipe
+# ------------------------------------------------
+doc_ids <- as.character(seq_len(nrow(openvarcom_clean)))
+annot <- udpipe_annotate(ud_model, 
+                         x = openvarcom_clean$text, 
+                         doc_id = doc_ids)
+annoi_df <- as.data.frame(annot)
+
+# ------------------------------------------------
+# 7. Pulizia UPOS + stopwords extra
+# ------------------------------------------------
+remove_upos <- c("PUNCT","ADP","DET","CCONJ","SCONJ",
+                 "X","PART","SYM","NUM","INTJ")
+
+annoi_df <- annoi_df %>% 
+  filter(!(upos %in% remove_upos)) %>% 
+  filter(!is.na(lemma), lemma != "")
+
+extra_stopwords <- c("che","si","io","non","avere","stare","fare",
+                     "dire","quello","essere","dovere","cosa","ci",
+  "lo","poi","perch","altro","anche","tutto","solo","chi","il","lo","la","i","gli",
+  "le","di","a","da","in","con","l","I","mi","me","mo","ti","to","questo","questa","quello","quella")
+
+# ------------------------------------------------
+# 7b. Rimuovo lemmi lunghi (>15 caratteri)
+# ------------------------------------------------
+annoi_df <- annoi_df %>% 
+  filter(nchar(lemma) <= 15)
+
+# ------------------------------------------------
+# 8. Frequenze lemmi
+# ------------------------------------------------
+lemma_freq <- annoi_df %>% 
+  filter(!tolower(lemma) %in% extra_stopwords) %>% 
+  count(lemma, name = "freq") %>% 
+  arrange(desc(freq))
+
+cat("\n--- Top 20 lemmi ---\n")
+print(head(lemma_freq, 20))
+
+if (nrow(lemma_freq) > 0) {
+  ggplot(head(lemma_freq, 20),
+         aes(x = reorder(lemma, freq), y = freq)) +
+    geom_col(fill = "#D55E00") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (UDPipe)",
+         x = "Lemma", y = "Frequenza")
+}
+
+# ------------------------------------------------
+# 9. Corpus quanteda
+# ------------------------------------------------
+texts_by_doc <- annoi_df %>% 
+  group_by(doc_id) %>% 
+  summarise(text = paste(lemma, collapse = " "),
+            .groups = "drop")
+
+corp <- corpus(texts_by_doc$text)
+
+# ------------------------------------------------
+# 10. Tokenizzazione
+# ------------------------------------------------
+tokens_clean <- tokens(corp,
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>% 
+  tokens_tolower() %>% 
+  tokens_remove(c(stopwords("italian"), extra_stopwords))
+
+dfm_unigrams <- dfm(tokens_clean)
+
+# ------------------------------------------------
+# 11. Frequenze (DFM)
+# ------------------------------------------------
+top20 <- topfeatures(dfm_unigrams, 20)
+
+if (length(top20) > 0) {
+  df_top <- data.frame(
+    feature = names(top20),
+    freq = as.numeric(top20)
+  )
+  
+  ggplot(df_top,
+         aes(x = reorder(feature, freq), y = freq)) +
+    geom_col(fill = "#0072B2") +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(title = "Top 20 parole (DFM)",
+         x = "Termine", y = "Frequenza")
+}
+
+# ------------------------------------------------
+# 12. Wordcloud
+# ------------------------------------------------
+if (nfeat(dfm_unigrams) > 0) {
+  textplot_wordcloud(dfm_unigrams,
+                     max_words = 50,
+                     color = brewer.pal(8, "Dark2"))
+} else {
+  cat("\n⚠ Niente da mostrare nella wordcloud.\n")
+}
+
+```
+
+
+
+
+```{r}
+###############################################################
+# SCRIPT UNIFICATO – ACL SU DUE STAGIONI
+# + TF-IDF PER SELEZIONE DELLE PAROLE IMPORTANTI
+###############################################################
+
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(FactoMineR)
+library(ggplot2)
+
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+###############################################################
+# FUNZIONE PER CARICARE UNA PUNTATA
+###############################################################
+process_puntata <- function(file, puntata_nome, stagione_nome) {
+  df <- read_delim(
+    file, delim = "\t", escape_double = FALSE,
+    trim_ws = TRUE, show_col_types = FALSE
+  )
+  
+  text_col <- grep("text", names(df), ignore.case = TRUE, value = TRUE)
+  if (length(text_col) == 0) stop("❌ Nessuna colonna testo in ", file)
+  
+  df <- df %>% rename(text = all_of(text_col))
+  
+  df$text <- gsub("'", " ", df$text)
+  df$text <- gsub("[^\x01-\x7F]", " ", df$text)
+  df$text <- trimws(df$text)
+  
+  df$puntata  <- puntata_nome
+  df$stagione <- stagione_nome
+  df
+}
+
+###############################################################
+# STOPWORDS
+###############################################################
+extra_stopwords <- c(
+  "che","si","io","non","avere","stare","fare","dire","quello",
+  "essere","dovere","cosa","ci","lo","poi","perch","altro","anche",
+  "tutto","solo","chi","il","la","i","gli","le","di","a","da","in",
+  "con","l","I","mi","me","mo","ti","to","questo","questa","quella",
+  "na","b","c","li","hahahahahaha","nkunku","gimenez","orban","bonny",
+  "pio","thuram","parisi","berardi","berardo","leao","pulisic",
+  "baschirotto","bastoni","pjanic","udogie","bremer","de","thiaw",
+  "lookman","freuler","xk","pergere","candrere",
+  "bonucci","rocco","zivere","ma","juva","avetye","p","fa","lina","esposito",
+  "ranieri","bisseck","jimenez","lucumi","maignan","joao","sucic",
+  "provedel","kean","raniere","udogia","beukema","rabiot","theo","gatti","@andrea",
+  "pavlovic","bissek","mario","calabria","gabbia","marco","lucume","fr","per","@jackolantern",
+  "zirkzee","dunque","c6o","yldiz","dumfries","@robben86","krstovic","pongracic","gervasoni",
+  "bastone","rodriguez","giroud","@mraclelio","jesus","adzic","lorenzo",
+  "j","yildiz","@armare","chiesa","mctominay","hojlund","gatto","juvo","terracciano",
+  "sommer","zappacosta","@danield95","freulere","caldirola","@thedarkyuno","bosniaco",
+  "cm","raniero","tonale","rafinha","mckennie","barella","dall","vasquez","@danield95",
+  "voi"
+)
+
+###############################################################
+# CARICO LE DUE STAGIONI
+###############################################################
+s1 <- list(
+  process_puntata("openvarcom11.csv", "P1_S1", "S1"),
+  process_puntata("openvarcom12.csv", "P2_S1", "S1"),
+  process_puntata("openvarcom13.csv", "P3_S1", "S1"),
+  process_puntata("openvarcom14.csv", "P4_S1", "S1"),
+  process_puntata("openvarcom15.csv", "P5_S1", "S1")
+)
+
+s2 <- list(
+  process_puntata("openvarcom.csv",  "P1_S2", "S2"),
+  process_puntata("openvarcom2.csv", "P2_S2", "S2"),
+  process_puntata("openvarcom3.csv", "P3_S2", "S2"),
+  process_puntata("openvarcom4.csv", "P4_S2", "S2"),
+  process_puntata("openvarcom5.csv", "P5_S2", "S2")
+)
+
+tutte <- bind_rows(s1, s2)
+
+###############################################################
+# LEMMATIZZAZIONE
+###############################################################
+udm <- udpipe_load_model(udpipe_download_model("italian")$file_model)
+
+ann <- udpipe_annotate(udm, x = tutte$text, doc_id = tutte$puntata)
+ann <- as.data.frame(ann)
+
+remove_upos <- c("PUNCT","ADP","DET","CCONJ","SCONJ","X","PART","SYM","NUM","INTJ")
+
+ann <- ann %>%
+  filter(!(upos %in% remove_upos)) %>%
+  filter(!is.na(lemma), lemma != "") %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  filter(nchar(lemma) <= 15)
+
+###############################################################
+# RICOSTRUISCO TESTI
+###############################################################
+testi_puntata <- ann %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop")
+
+testi_puntata <- testi_puntata %>%
+  left_join(tutte %>% select(puntata, stagione) %>% distinct(),
+            by = c("doc_id" = "puntata"))
+
+###############################################################
+# CORPUS + DFM GREZZO (per CA)
+###############################################################
+corp <- corpus(testi_puntata$text, docnames = testi_puntata$doc_id)
+
+dfm_raw <- dfm(tokens(corp, remove_punct = TRUE, remove_numbers = TRUE) %>% tokens_tolower())
+
+###############################################################
+# CA (richiede conteggi grezzi)
+###############################################################
+mat <- as.matrix(dfm_raw)
+res_ca <- CA(mat, graph = FALSE)
+
+###############################################################
+# 📈 SCREE PLOT – Autovalori della CA
+###############################################################
+eig_df <- as.data.frame(res_ca$eig)
+eig_df$Dim <- seq_len(nrow(eig_df))
+
+ggplot(eig_df, aes(x = Dim, y = `percentage of variance`)) +
+  geom_line() +
+  geom_point(size = 2) +
+  theme_minimal(base_size = 14) +
+  scale_x_continuous(breaks = eig_df$Dim) +
+  labs(
+    title = "Scree plot – Analisi delle corrispondenze",
+    x = "Dimensione",
+    y = "Percentuale di inerzia spiegata"
+  )
+
+###############################################################
+# COORDINATE DOCUMENTI
+###############################################################
+coords_docs <- as.data.frame(res_ca$row$coord)
+colnames(coords_docs)[1:2] <- c("Dim1", "Dim2")
+coords_docs$puntata <- rownames(coords_docs)
+
+coords_docs <- coords_docs %>%
+  left_join(testi_puntata %>% select(doc_id, stagione),
+            by = c("puntata" = "doc_id"))
+
+###############################################################
+# 🎨 GRAFICO PUNTATE COLORATE
+###############################################################
+ggplot(coords_docs, aes(Dim1, Dim2, label = puntata, color = stagione)) +
+  geom_point(size = 5) +
+  geom_text(size = 4, vjust = -0.6) +
+  scale_color_manual(values = c("S1" = "blue", "S2" = "red")) +
+  theme_minimal(base_size = 14) +
+  labs(title = "ACL – Puntate (Stagione 1 vs Stagione 2)",
+       x = "Dimensione 1", y = "Dimensione 2")
+
+###############################################################
+# TF-IDF (per selezionare parole importanti)
+###############################################################
+dfm_tfidf <- dfm_tfidf(dfm_raw, scheme_tf = "count", scheme_df = "inverse")
+
+term_scores <- colSums(dfm_tfidf)
+top_terms <- names(sort(term_scores, decreasing = TRUE))[1:30]
+
+###############################################################
+# COORDINATE PAROLE
+###############################################################
+coords_words <- as.data.frame(res_ca$col$coord)
+colnames(coords_words)[1:2] <- c("Dim1", "Dim2")
+coords_words$term <- rownames(coords_words)
+
+coords_top <- coords_words %>% filter(term %in% top_terms)
+
+###############################################################
+# 🔥 GRAFICO PAROLE – top 30 tf-idf
+###############################################################
+ggplot(coords_top, aes(Dim1, Dim2, label = term)) +
+  geom_point(color = "darkblue", size = 2.5) +
+  geom_text(size = 2.5, vjust = -0.4) +
+  theme_minimal(base_size = 14) +
+  labs(title = "ACL – Top 30 parole più importanti (TF-IDF)",
+       x = "Dimensione 1", y = "Dimensione 2")
+
+###############################################################
+# 📌 CONTRIBUTI ASSOLUTI (contrib) E CONTRIBUTI RELATIVI (cos²)
+###############################################################
+
+# Contributi assoluti delle parole
+contrib_parole <- as.data.frame(res_ca$col$contrib)
+colnames(contrib_parole) <- gsub(" ", "", colnames(contrib_parole))
+contrib_parole$term <- rownames(contrib_parole)
+
+# Contributi relativi delle parole
+cos2_parole <- as.data.frame(res_ca$col$cos2)
+colnames(cos2_parole) <- gsub(" ", "", colnames(cos2_parole))
+cos2_parole$term <- rownames(cos2_parole)
+
+# Contributi assoluti dei documenti
+contrib_docs <- as.data.frame(res_ca$row$contrib)
+colnames(contrib_docs) <- gsub(" ", "", colnames(contrib_docs))
+contrib_docs$puntata <- rownames(contrib_docs)
+
+# Contributi relativi dei documenti
+cos2_docs <- as.data.frame(res_ca$row$cos2)
+colnames(cos2_docs) <- gsub(" ", "", colnames(cos2_docs))
+cos2_docs$puntata <- rownames(cos2_docs)
+
+###############################################################
+# 🔎 TOP PAROLE CHE COSTRUISCONO DI PIÙ DIM1 E DIM2
+###############################################################
+top_parole_dim1 <- contrib_parole %>% 
+  select(term, Dim1) %>% 
+  arrange(desc(Dim1)) %>% 
+  head(20)
+
+top_parole_dim2 <- contrib_parole %>% 
+  select(term, Dim2) %>% 
+  arrange(desc(Dim2)) %>% 
+  head(20)
+
+cat("\n\n🔝 Top 20 parole che contribuiscono maggiormente alla Dimensione 1:\n")
+print(top_parole_dim1)
+
+cat("\n\n🔝 Top 20 parole che contribuiscono maggiormente alla Dimensione 2:\n")
+print(top_parole_dim2)
+
+###############################################################
+# 🔎 TOP PUNTATE MEGLIO RAPPRESENTATE (cos²)
+###############################################################
+top_docs_dim1 <- cos2_docs %>%
+  select(puntata, Dim1) %>% 
+  arrange(desc(Dim1)) %>% 
+  head(10)
+
+top_docs_dim2 <- cos2_docs %>%
+  select(puntata, Dim2) %>%
+  arrange(desc(Dim2)) %>%
+  head(10)
+
+cat("\n\n📘 Migliori puntate rappresentate in Dim1:\n")
+print(top_docs_dim1)
+
+cat("\n\n📗 Migliori puntate rappresentate in Dim2:\n")
+print(top_docs_dim2)
+
+###############################################################
+# 📊 GRAFICO AUTOVALORI (BARPLOT)
+###############################################################
+ggplot(eig_df, aes(x = factor(Dim), y = `percentage of variance`)) +
+  geom_col(fill = "steelblue") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Autovalori – Percentuale di Varianza Spiegata",
+    x = "Dimensione",
+    y = "Varianza spiegata (%)"
+  )
+
+###############################################################
+# 📊 GRAFICO AUTOVETTORI (LOADINGS DELLE PAROLE)
+###############################################################
+
+# estraggo autovettori = coordinate delle parole
+loadings <- as.data.frame(res_ca$col$coord)
+colnames(loadings) <- gsub(" ", "", colnames(loadings))  # "Dim 1" -> "Dim1"
+loadings$term <- rownames(loadings)
+
+# selezione delle parole più rappresentative (cos² alti)
+cos2_parole_temp <- as.data.frame(res_ca$col$cos2)
+colnames(cos2_parole_temp) <- gsub(" ", "", colnames(cos2_parole_temp))
+cos2_parole_temp$term <- rownames(cos2_parole_temp)
+
+# prendo le prime 50 parole meglio rappresentate su Dim1+Dim2
+loadings_top <- loadings %>%
+  inner_join(cos2_parole_temp, by = "term") %>%
+  arrange(desc(Dim1.y + Dim2.y)) %>%
+  head(50)
+
+ggplot(loadings_top, aes(Dim1.x, Dim2.x, label = term)) +
+  geom_point(color = "firebrick", size = 2.5) +
+  geom_text(vjust = -0.5, size = 3) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Autovettori – Loadings delle parole sulle prime due dimensioni",
+    x = "Autovettore Dimensione 1",
+    y = "Autovettore Dimensione 2"
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50")
+
+
+```
+
+
+```{r}
+###############################################################
+# 📌 CONTRIBUTI ASSOLUTI (contrib) E CONTRIBUTI RELATIVI (cos²)
+###############################################################
+
+contrib_parole <- as.data.frame(res_ca$col$contrib)
+colnames(contrib_parole) <- gsub(" ", "", colnames(contrib_parole))
+contrib_parole$term <- rownames(contrib_parole)
+
+cos2_parole <- as.data.frame(res_ca$col$cos2)
+colnames(cos2_parole) <- gsub(" ", "", colnames(cos2_parole))
+cos2_parole$term <- rownames(cos2_parole)
+
+contrib_docs <- as.data.frame(res_ca$row$contrib)
+colnames(contrib_docs) <- gsub(" ", "", colnames(contrib_docs))
+contrib_docs$puntata <- rownames(contrib_docs)
+
+cos2_docs <- as.data.frame(res_ca$row$cos2)
+colnames(cos2_docs) <- gsub(" ", "", colnames(cos2_docs))
+cos2_docs$puntata <- rownames(cos2_docs)
+
+###############################################################
+# 🔎 TOP PAROLE CHE COSTRUISCONO DI PIÙ DIM1 E DIM2
+###############################################################
+
+top_parole_dim1 <- contrib_parole %>% select(term, Dim1) %>% arrange(desc(Dim1)) %>% head(20)
+top_parole_dim2 <- contrib_parole %>% select(term, Dim2) %>% arrange(desc(Dim2)) %>% head(20)
+
+cat("\n\n🔝 Top 20 parole che contribuiscono maggiormente alla Dimensione 1:\n")
+print(top_parole_dim1)
+
+cat("\n\n🔝 Top 20 parole che contribuiscono maggiormente alla Dimensione 2:\n")
+print(top_parole_dim2)
+
+###############################################################
+# 🔎 TOP PUNTATE MEGLIO RAPPRESENTATE (cos²)
+###############################################################
+
+top_docs_dim1 <- cos2_docs %>% select(puntata, Dim1) %>% arrange(desc(Dim1)) %>% head(10)
+top_docs_dim2 <- cos2_docs %>% select(puntata, Dim2) %>% arrange(desc(Dim2)) %>% head(10)
+
+cat("\n\n📘 Migliori puntate rappresentate in Dim1:\n")
+print(top_docs_dim1)
+
+cat("\n\n📗 Migliori puntate rappresentate in Dim2:\n")
+print(top_docs_dim2)
+
+###############################################################
+# 📊 GRAFICO AUTOVALORI (BARPLOT)
+###############################################################
+
+ggplot(eig_df, aes(x = factor(Dim), y = `percentage of variance`)) +
+  geom_col(fill = "steelblue") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Autovalori – Percentuale di Varianza Spiegata",
+    x = "Dimensione",
+    y = "Varianza spiegata (%)"
+  )
+
+###############################################################
+# 📊 GRAFICO AUTOVETTORI (LOADINGS DELLE PAROLE) – 3 DIMENSIONI
+###############################################################
+
+library(plotly)
+
+loadings <- as.data.frame(res_ca$col$coord)
+colnames(loadings) <- gsub(" ", "", colnames(loadings))
+loadings$term <- rownames(loadings)
+
+cos2_parole_temp <- as.data.frame(res_ca$col$cos2)
+colnames(cos2_parole_temp) <- gsub(" ", "", colnames(cos2_parole_temp))
+cos2_parole_temp$term <- rownames(cos2_parole_temp)
+
+# parole meglio rappresentate sulle dimensioni 1-2-3
+loadings_top <- loadings %>%
+  inner_join(cos2_parole_temp, by = "term") %>%
+  arrange(desc(Dim1.y + Dim2.y + Dim3.y)) %>%
+  head(50)
+
+###############################################################
+# 📈 Grafico autovettori Dim1–Dim2
+###############################################################
+
+ggplot(loadings_top, aes(Dim1.x, Dim2.x, label = term)) +
+  geom_point(color = "firebrick", size = 2.7) +
+  geom_text(vjust = -0.5, size = 3) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Autovettori – Loadings delle parole (Dimensioni 1–2)",
+       x = "Autovettore Dimensione 1",
+       y = "Autovettore Dimensione 2") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50")
+
+###############################################################
+# 📈 Grafico autovettori Dim1–Dim3
+###############################################################
+
+ggplot(loadings_top, aes(Dim1.x, Dim3.x, label = term)) +
+  geom_point(color = "darkgreen", size = 2.7) +
+  geom_text(vjust = -0.5, size = 3) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Autovettori – Loadings delle parole (Dimensioni 1–3)",
+       x = "Autovettore Dimensione 1",
+       y = "Autovettore Dimensione 3") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50")
+
+###############################################################
+# 🧊 GRAFICO 3D AUTOVETTORI (Dim1–Dim2–Dim3)
+###############################################################
+
+plot_ly(
+  loadings_top,
+  x = ~Dim1.x,
+  y = ~Dim2.x,
+  z = ~Dim3.x,
+  type = "scatter3d",
+  mode = "markers+text",
+  text = ~term,
+  marker = list(size = 4, color = "red")
+) %>%
+  layout(
+    title = "Autovettori 3D – Loadings delle parole (Dim1–Dim2–Dim3)",
+    scene = list(
+      xaxis = list(title = "Dim 1"),
+      yaxis = list(title = "Dim 2"),
+      zaxis = list(title = "Dim 3")
+    )
+  )
+
+
+```
+
+```{r}
+###############################################################
+# 📊 GRAFICO AUTOVETTORI (PUNTATE) – 3 DIMENSIONI
+###############################################################
+
+library(plotly)
+
+# estraggo coordinate delle puntate (autovettori = coord dei documenti)
+loadings_docs <- as.data.frame(res_ca$row$coord)
+colnames(loadings_docs) <- gsub(" ", "", colnames(loadings_docs))  # Dim 1 → Dim1
+loadings_docs$puntata <- rownames(loadings_docs)
+
+# estraggo cos² delle puntate
+cos2_docs_temp <- as.data.frame(res_ca$row$cos2)
+colnames(cos2_docs_temp) <- gsub(" ", "", colnames(cos2_docs_temp))
+cos2_docs_temp$puntata <- rownames(cos2_docs_temp)
+
+# seleziono le puntate meglio rappresentate su Dim1+Dim2+Dim3
+loadings_docs_top <- loadings_docs %>%
+  inner_join(cos2_docs_temp, by = "puntata") %>%
+  arrange(desc(Dim1.y + Dim2.y + Dim3.y)) %>%
+  head(15)   # prime 15 puntate più informative
+
+###############################################################
+# 📈 Grafico autovettori Dim1–Dim2 (PUNTATE)
+###############################################################
+
+ggplot(loadings_docs_top, aes(Dim1.x, Dim2.x, label = puntata)) +
+  geom_point(color = "purple", size = 4) +
+  geom_text(vjust = -0.6, size = 4) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Autovettori Puntate – Dimensioni 1–2",
+    x = "Autovettore Dimensione 1",
+    y = "Autovettore Dimensione 2"
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50")
+
+###############################################################
+# 📈 Grafico autovettori Dim1–Dim3 (PUNTATE)
+###############################################################
+
+ggplot(loadings_docs_top, aes(Dim1.x, Dim3.x, label = puntata)) +
+  geom_point(color = "darkorange", size = 4) +
+  geom_text(vjust = -0.6, size = 4) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Autovettori Puntate – Dimensioni 1–3",
+    x = "Autovettore Dimensione 1",
+    y = "Autovettore Dimensione 3"
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50")
+
+###############################################################
+# 🧊 GRAFICO 3D AUTOVETTORI (PUNTATE) Dim1–Dim2–Dim3
+###############################################################
+
+plot_ly(
+  loadings_docs_top,
+  x = ~Dim1.x,
+  y = ~Dim2.x,
+  z = ~Dim3.x,
+  type = "scatter3d",
+  mode = "markers+text",
+  text = ~puntata,
+  marker = list(size = 6, color = "blue")
+) %>%
+  layout(
+    title = "Autovettori 3D – Puntate (Dim1–Dim2–Dim3)",
+    scene = list(
+      xaxis = list(title = "Dimensione 1"),
+      yaxis = list(title = "Dimensione 2"),
+      zaxis = list(title = "Dimensione 3")
+    )
+  )
+
+```
+
+```{r}
+###############################################################
+# WORDCLOUD + FREQUENZE – STAGIONE 2
+###############################################################
+
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+###############################################################
+# File delle 5 puntate della stagione 2
+###############################################################
+files_s2 <- c(
+  "openvarcom.csv",
+  "openvarcom2.csv",
+  "openvarcom3.csv",
+  "openvarcom4.csv",
+  "openvarcom5.csv"
+)
+
+###############################################################
+# Funzione di caricamento + pulizia base
+###############################################################
+load_and_clean <- function(file) {
+  df <- read_delim(file, delim = "\t", trim_ws = TRUE, escape_double = FALSE)
+  
+  # individua colonna testo
+  text_col <- grep("text", names(df), value = TRUE, ignore.case = TRUE)
+  df <- df %>% rename(text = all_of(text_col))
+  
+  # pulizia testo
+  df$text <- gsub("'", " ", df$text)
+  df$text <- gsub("[^\x01-\x7F]", " ", df$text)
+  df$text <- trimws(df$text)
+  
+  return(df$text)
+}
+
+###############################################################
+# 1) Importo tutti i commenti delle 5 puntate
+###############################################################
+all_texts <- unlist(lapply(files_s2, load_and_clean))
+
+###############################################################
+# 2) Lemmatizzazione unica per la stagione
+###############################################################
+ud_model <- udpipe_load_model(udpipe_download_model("italian")$file_model)
+
+annot <- udpipe_annotate(ud_model, x = all_texts, doc_id = seq_along(all_texts))
+ann_df <- as.data.frame(annot)
+
+###############################################################
+# 3) Pulizia UPOS + stopwords
+###############################################################
+remove_upos <- c("PUNCT","ADP","DET","CCONJ","SCONJ","X","PART","SYM","NUM","INTJ")
+
+extra_stopwords <- c(
+  "che","si","io","non","avere","stare","fare","dire","quello","essere",
+  "dovere","cosa","ci","lo","poi","perch","altro","anche","tutto","solo","chi",
+  "il","lo","la","i","gli","le","di","a","da","in","con","l","mi","me","mo","ti","to"
+)
+
+ann_df <- ann_df %>%
+  filter(!(upos %in% remove_upos)) %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  filter(!is.na(lemma), lemma != "") %>%
+  filter(nchar(lemma) <= 15)
+
+###############################################################
+# 4) Corpus unico + DFM
+###############################################################
+texts_clean <- ann_df %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop")
+
+corp <- corpus(texts_clean$text)
+
+tokens_clean <- tokens(corp,
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(stopwords("italian"), extra_stopwords))
+
+dfm_s2 <- dfm(tokens_clean)
+
+###############################################################
+# 5) Wordcloud unica stagione 2
+###############################################################
+set.seed(123)
+textplot_wordcloud(dfm_s2,
+                   max_words = 100,
+                   random_order = FALSE,
+                   rotation = 0.25,
+                   color = brewer.pal(8, "Dark2"))
+
+###############################################################
+# 6) Grafico TOP 20 parole – Stagione 2
+###############################################################
+top20_s2 <- topfeatures(dfm_s2, 20)
+
+df_top <- data.frame(
+  feature = names(top20_s2),
+  freq = as.numeric(top20_s2)
+)
+
+ggplot(df_top,
+       aes(x = reorder(feature, freq), y = freq)) +
+  geom_col(fill = "#0072B2") +
+  coord_flip() +
+  theme_minimal(base_size = 14) +
+  labs(title = "Top 20 parole – Stagione 2",
+       x = "Termine", y = "Frequenza")
+
+
+```
+
+```{r}
+###############################################################
+# WORDCLOUD UNICA – STAGIONE 1 (Puntate 11–15)
+###############################################################
+
+library(udpipe)
+library(readr)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(RColorBrewer)
+library(ggplot2)
+library(tm)
+
+# ------------------------------------------------
+# 1. Modello italiano UDPipe
+# ------------------------------------------------
+ud_model <- udpipe_download_model(language = "italian")
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# ------------------------------------------------
+# 2. Cartella di lavoro (la tua)
+# ------------------------------------------------
+setwd("/Users/pasqualedemicco/Desktop/openvar/ytdt_data")
+
+# ------------------------------------------------
+# 3. File della Stagione 1
+# ------------------------------------------------
+files_s1 <- c("openvarcom11.csv",
+              "openvarcom12.csv",
+              "openvarcom13.csv",
+              "openvarcom14.csv",
+              "openvarcom15.csv")
+
+# ------------------------------------------------
+# 4. Funzione: importa e pulisce come nei tuoi script
+# ------------------------------------------------
+load_episode <- function(file) {
+  df <- read_delim(file, delim = "\t",
+                   escape_double = FALSE,
+                   trim_ws = TRUE,
+                   show_col_types = FALSE)
+  
+  text_col <- grep("text", names(df), ignore.case = TRUE, value = TRUE)
+  df <- df %>% rename(text = all_of(text_col))
+  
+  # pulizia testo identica ai tuoi script
+  df$text <- gsub("'", " ", df$text)
+  df$text <- gsub("[^\x01-\x7F]", " ", df$text)
+  df$text <- trimws(df$text)
+  
+  return(df$text)
+}
+
+# ------------------------------------------------
+# 5. Importo tutte le puntate
+# ------------------------------------------------
+all_comments <- unlist(lapply(files_s1, load_episode))
+
+# ------------------------------------------------
+# 6. Lemmatizzazione (come nei tuoi script)
+# ------------------------------------------------
+doc_ids <- as.character(seq_len(length(all_comments)))
+annot <- udpipe_annotate(ud_model, x = all_comments, doc_id = doc_ids)
+annoi_df <- as.data.frame(annot)
+
+# ------------------------------------------------
+# 7. Pulizia UPOS identica al tuo schema
+# ------------------------------------------------
+remove_upos <- c("PUNCT","ADP","DET","CCONJ","SCONJ",
+                 "X","PART","SYM","NUM","INTJ")
+
+annoi_df <- annoi_df %>%
+  filter(!(upos %in% remove_upos)) %>%
+  filter(!is.na(lemma), lemma != "")
+
+# stopwords come le tue
+extra_stopwords <- c("che","si","io","non","avere","stare","fare",
+                     "dire","quello","essere","dovere","cosa","ci",
+                     "lo","poi","perch","altro","anche","tutto","solo","chi",
+                     "il","lo","la","i","gli","le","di","a","da","in","con",
+                     "l","I","mi","me","mo","ti","to","questo","questa",
+                     "quello","quella")
+
+# ------------------------------------------------
+# 7b. Lemmi troppo lunghi
+# ------------------------------------------------
+annoi_df <- annoi_df %>% filter(nchar(lemma) <= 15)
+
+# ------------------------------------------------
+# 8. Frequenze aggregate lemmi (UDPipe)
+# ------------------------------------------------
+lemma_freq <- annoi_df %>%
+  filter(!tolower(lemma) %in% extra_stopwords) %>%
+  count(lemma, name = "freq") %>%
+  arrange(desc(freq))
+
+cat("\n===== TOP 30 LEMMI STAGIONE 1 =====\n")
+print(head(lemma_freq, 30))
+
+# ------------------------------------------------
+# 9. Corpus quanteda (collassa per doc_id)
+# ------------------------------------------------
+texts_by_doc <- annoi_df %>%
+  group_by(doc_id) %>%
+  summarise(text = paste(lemma, collapse = " "),
+            .groups = "drop")
+
+corp <- corpus(texts_by_doc$text)
+
+# ------------------------------------------------
+# 10. Tokenizzazione
+# ------------------------------------------------
+tokens_clean <- tokens(corp,
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(stopwords("italian"), extra_stopwords))
+
+dfm_unigrams <- dfm(tokens_clean)
+
+# ------------------------------------------------
+# 11. Top keywords DFM
+# ------------------------------------------------
+top20 <- topfeatures(dfm_unigrams, 20)
+print(top20)
+
+df_top <- data.frame(
+  feature = names(top20),
+  freq = as.numeric(top20)
+)
+
+ggplot(df_top,
+       aes(x = reorder(feature, freq), y = freq)) +
+  geom_col(fill = "#0072B2") +
+  coord_flip() +
+  theme_minimal(base_size = 14) +
+  labs(title = "Top 20 parole – Stagione 1",
+       x = "Termine", y = "Frequenza")
+
+# ------------------------------------------------
+# 12. Wordcloud finale STAGIONE 1
+# ------------------------------------------------
+textplot_wordcloud(dfm_unigrams,
+                   max_words = 80,
+                   color = brewer.pal(8, "Dark2"))
+
+
+```
+
